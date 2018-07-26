@@ -10,7 +10,8 @@ import {
 } from 'min-dash';
 
 import {
-  closest as domClosest
+  closest as domClosest,
+  domify
 } from 'min-dom';
 
 var DiagramEditor = require('./diagram-editor');
@@ -25,10 +26,19 @@ var diagramOriginModule = require('diagram-js-origin');
 
 var generateImage = require('app/util/generate-image'),
     isInput = require('util/dom/is-input'),
-    isInputActive = require('util/dom/is-input').active;
+    isInputActive = require('util/dom/is-input').active,
+    dragger = require('util/dom/dragger'),
+    copy = require('util/copy');
 
 var debug = require('debug')('dmn-editor');
 
+var propertiesPanelModule = require('dmn-js-properties-panel'),
+    propertiesProviderModule = require('dmn-js-properties-panel/lib/provider/camunda'),
+    camundaModdlePackage = require('camunda-dmn-moddle/resources/camunda');
+
+var drdAdapterModule = require('dmn-js-properties-panel/lib/adapter/drd'),
+    decisionTableAdapterModule = require('dmn-js-properties-panel/lib/adapter/decision-table'),
+    literalExpressionAdapterModule = require('dmn-js-properties-panel/lib/adapter/literal-expression');
 
 /**
  * A DMN 1.1 diagram editing component.
@@ -61,6 +71,9 @@ function DmnEditor(options) {
       this.updateState();
     }
   });
+
+  // elements to insert modeler and properties panel into
+  this.$propertiesEl = domify('<div class="properties-parent"></div>');
 }
 
 inherits(DmnEditor, DiagramEditor);
@@ -229,21 +242,108 @@ DmnEditor.prototype.getModeler = function() {
   return this.modeler;
 };
 
+DmnEditor.prototype.mountProperties = function(node) {
+  debug('mount properties');
+
+  node.appendChild(this.$propertiesEl);
+};
+
+DmnEditor.prototype.unmountProperties = function(node) {
+  debug('unmount properties');
+
+  node.removeChild(this.$propertiesEl);
+};
+
+DmnEditor.prototype.resizeProperties = function onDrag(panelLayout, event, delta) {
+
+  var oldWidth = panelLayout.open ? panelLayout.width : 0;
+
+  var newWidth = Math.max(oldWidth + delta.x * -1, 0);
+
+  this.emit('layout:changed', {
+    propertiesPanel: {
+      open: newWidth > 25,
+      width: newWidth
+    }
+  });
+
+  this.notifyModeler('propertiesPanel.resized');
+};
+
+DmnEditor.prototype.toggleProperties = function() {
+
+  var config = this.layout.propertiesPanel;
+
+  this.emit('layout:changed', {
+    propertiesPanel: {
+      open: !config.open,
+      width: !config.open ? (config.width > 25 ? config.width : 250) : config.width
+    }
+  });
+
+  this.notifyModeler('propertiesPanel.resized');
+};
+
 DmnEditor.prototype.createModeler = function($el) {
   return new DmnJS({
-    'position': 'absolute',
-    'container': $el,
-    'drd': {
+    position: 'absolute',
+    container: $el,
+    drd: {
       additionalModules: [
-        diagramOriginModule
-      ]
+        diagramOriginModule,
+        propertiesPanelModule,
+        propertiesProviderModule,
+        drdAdapterModule
+      ],
+      propertiesPanel: {
+        parent: this.$propertiesEl
+      }
+    },
+    decisionTable: {
+      additionalModules: [
+        propertiesPanelModule,
+        propertiesProviderModule,
+        decisionTableAdapterModule
+      ],
+      propertiesPanel: {
+        parent: this.$propertiesEl
+      }
+    },
+    literalExpression: {
+      additionalModules: [
+        propertiesPanelModule,
+        propertiesProviderModule,
+        literalExpressionAdapterModule
+      ],
+      propertiesPanel: {
+        parent: this.$propertiesEl
+      }
     },
     common: {
       keyboard: {
         bindTo: $el
       }
+    },
+    moddleExtensions: {
+      camunda: camundaModdlePackage
     }
   });
+};
+
+/**
+ * Notify initialized modeler about an event.
+ *
+ * @param {String} eventName
+ */
+DmnEditor.prototype.notifyModeler = function(eventName) {
+
+  var modeler = this.getModeler();
+
+  try {
+    modeler.getActiveViewer().get('eventBus').fire(eventName);
+  } catch (e) {
+    // we don't care
+  }
 };
 
 DmnEditor.prototype.resize = function() {
@@ -301,6 +401,13 @@ DmnEditor.prototype.saveXML = function(done) {
 DmnEditor.prototype.render = function() {
   var warnings = getWarnings(this.lastImport);
 
+  var layout = this.layout,
+      propertiesLayout = layout.propertiesPanel;
+
+  var propertiesStyle = {
+    width: (propertiesLayout.open ? propertiesLayout.width : 0) + 'px'
+  };
+
   return (
     <div className="dmn-editor" key={ this.id }>
       <Loader hidden={ !!this.lastXML } />
@@ -308,6 +415,30 @@ DmnEditor.prototype.render = function() {
         className="editor-container"
         onAppend={ this.compose('mountEditor') }
         onRemove={ this.compose('unmountEditor') }>
+      </div>
+      <div className="properties" style={ propertiesStyle } tabIndex="0">
+        <div
+          className="toggle"
+          ref="properties-toggle"
+          draggable="true"
+          onClick={ this.compose('toggleProperties') }
+          onDragstart={
+            dragger(this.compose('resizeProperties', copy(propertiesLayout)))
+          }>
+          Properties Panel
+        </div>
+        <div
+          className="resize-handle"
+          draggable="true"
+          onDragStart={
+            dragger(this.compose('resizeProperties', copy(propertiesLayout)))
+          }>
+        </div>
+        <div
+          className="properties-container"
+          onAppend={ this.compose('mountProperties') }
+          onRemove={ this.compose('unmountProperties') }>
+        </div>
       </div>
       <WarningsOverlay
         warnings={ warnings }
